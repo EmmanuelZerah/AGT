@@ -22,21 +22,40 @@ battle_of_the_sexes = np.array([
 
 
 def normalize(payoffs_matrix):
-    """Normalize a payoffs_matrix to [0, 1]."""
-    min_val = np.min(payoffs_matrix)
-    max_val = np.max(payoffs_matrix)
-    if max_val == min_val:
-        return np.zeros_like(payoffs_matrix)
-    return (payoffs_matrix - min_val) / (max_val - min_val)
+    """
+    Normalize each player's payoff matrix independently to the range [0, 1].
+    Args:
+        payoffs_matrix: A 3D numpy array of shape (n_actions_p1, n_actions_p2, 2)
+                        where the last dimension corresponds to (p1_payoff, p2_payoff).
+
+    Returns:
+        A normalized payoff matrix of the same shape.
+    """
+    norm_payoffs_matrix = np.zeros_like(payoffs_matrix, dtype=np.float64)
+
+    for player in [0, 1]:  # 0 for player 1, 1 for player 2
+        player_payoffs = payoffs_matrix[:, :, player]
+        min_val = np.min(player_payoffs)
+        max_val = np.max(player_payoffs)
+
+        # Avoid division by zero
+        if max_val - min_val > 0:
+            norm_payoffs_matrix[:, :, player] = (player_payoffs - min_val) / (max_val - min_val)
+        else:
+            norm_payoffs_matrix[:, :, player] = 0.0  # all values are the same
+
+    return norm_payoffs_matrix
 
 
-def simulate_game(payoffs_matrix, n_rounds, lr1=0.1, lr2=0.1):
+def simulate_game(payoffs_matrix, n_rounds, name1="Player 1", name2="Player 2", lr1=0.1, lr2=0.1):
     """
     Simulate a game between two agents using the MW algorithm.
 
     Args:
         payoffs_matrix: Payoff matrix for the game [n_actions x n_actions x 2]
         n_rounds: Number of rounds to play
+        name1: Name of agent 1
+        name2: Name of agent 2
         lr1: Learning rate for agent 1
         lr2: Learning rate for agent 2
 
@@ -47,8 +66,8 @@ def simulate_game(payoffs_matrix, n_rounds, lr1=0.1, lr2=0.1):
     n = payoffs_matrix.shape[0]
 
     # Create agents
-    agent1 = MWAgent(n, lr1, "Player 1")
-    agent2 = MWAgent(n, lr2, "Player 2")
+    agent1 = MWAgent(n, lr1, name1)
+    agent2 = MWAgent(n, lr2, name2)
 
     for t in range(n_rounds):
         # Agents choose actions
@@ -99,7 +118,7 @@ def plot_joint_strategy_matrix(agent1, agent2, payoffs_matrix, labels=("Action 0
     p1 = agent1.distribution_history[-1]  # Final strategy of Player 1
     p2 = agent2.distribution_history[-1]  # Final strategy of Player 2
 
-    joint_probs = np.outer(p1, p2)  # 2x2 matrix of joint outcome probabilities
+    joint_probs = np.outer(p1, p2)  # 2x2 matrix of joint outcome probabilities. assumes independent actions
 
     fig, ax = plt.subplots()
     cax = ax.matshow(joint_probs, cmap="Greens", vmin=0, vmax=1)
@@ -119,7 +138,7 @@ def plot_joint_strategy_matrix(agent1, agent2, payoffs_matrix, labels=("Action 0
     ax.set_yticklabels(labels)
     ax.set_xlabel(f"{agent2.name}'s Actions")
     ax.set_ylabel(f"{agent1.name}'s Actions")
-    plt.title("Agent's Final Joint Action Distribution with Payoffs")
+    plt.title("Agent's Final Joint Action Distribution")
     fig.colorbar(cax, label="Probability")
     plt.tight_layout()
     plt.show()
@@ -151,7 +170,7 @@ def plot_empirical_joint_distribution(agent1, agent2, payoffs_matrix, labels=("A
             prob = joint_probs[i, j]
             payoff1 = payoffs_matrix[i, j, 0]
             payoff2 = payoffs_matrix[i, j, 1]
-            text = f"P={prob:.2f}\n({payoff1}, {payoff2})"
+            text = f"({payoff1}, {payoff2})\nP={prob:.2f}"
             ax.text(j, i, text, va='center', ha='center', fontsize=9)
 
     ax.set_xticks(range(n))
@@ -160,7 +179,7 @@ def plot_empirical_joint_distribution(agent1, agent2, payoffs_matrix, labels=("A
     ax.set_yticklabels(labels)
     ax.set_xlabel(f"{agent2.name}'s Actions")
     ax.set_ylabel(f"{agent1.name}'s Actions")
-    plt.title("Empirical Joint Action Distribution with Payoffs")
+    plt.title("Empirical Joint Action Distribution")
     fig.colorbar(cax, label="Probability")
     plt.tight_layout()
     plt.show()
@@ -181,7 +200,7 @@ def experiment_varying_opponent_lr(
     lr2_values = np.clip(lr2_values, 1e-4, 1.0)
 
     def run_single_simulation(lr2):
-        agent1, agent2 = simulate_game(payoffs_matrix, n_rounds, fixed_lr1, lr2)
+        agent1, agent2 = simulate_game(payoffs_matrix, n_rounds, lr1=fixed_lr1, lr2=lr2)
         return agent1.distribution_history[-1][target_action_index]
 
     avg_probs = []
@@ -210,16 +229,16 @@ def main():
     # Simulate Chicken game
     agent1_chicken, agent2_chicken = simulate_game(chicken_game, N_ROUNDS, LR1, LR2)
     plot_regret(agent1_chicken, agent2_chicken, "Chicken Game")
-    plot_joint_strategy_matrix(agent1_chicken, agent2_chicken, chicken_game, labels=("Swerve", "Straight"))
-    plot_empirical_joint_distribution(agent1_chicken, agent2_chicken, chicken_game, labels=("Swerve", "Straight"))
-    experiment_varying_opponent_lr(chicken_game, N_ROUNDS, target_action_name="Swerve")
+    plot_joint_strategy_matrix(agent1_chicken, agent2_chicken, chicken_game, labels=("Straight", "Swerve"))
+    plot_empirical_joint_distribution(agent1_chicken, agent2_chicken, chicken_game, labels=("Straight", "Swerve"))
+    experiment_varying_opponent_lr(chicken_game, N_ROUNDS, target_action_index=0, target_action_name="Straight")
 
-    # Simulate Battle of sexes
-    agent1_battle, agent2_battle = simulate_game(battle_of_the_sexes, N_ROUNDS, LR1, LR2)
-    plot_regret(agent1_battle, agent2_battle, "Battle of the sexes")
-    plot_joint_strategy_matrix(agent1_battle, agent2_battle, chicken_game, labels=("Prize Fight", "Ballet"))
-    plot_empirical_joint_distribution(agent1_battle, agent2_battle, chicken_game, labels=("Prize Fight", "Ballet"))
-    experiment_varying_opponent_lr(battle_of_the_sexes, N_ROUNDS, target_action_name="Prize Fight")
+    # # Simulate Battle of sexes
+    # agent1_battle, agent2_battle = simulate_game(battle_of_the_sexes, N_ROUNDS, LR1, LR2)
+    # plot_regret(agent1_battle, agent2_battle, "Battle of the sexes")
+    # plot_joint_strategy_matrix(agent1_battle, agent2_battle, battle_of_the_sexes, labels=("Prize Fight", "Ballet"))
+    # plot_empirical_joint_distribution(agent1_battle, agent2_battle, battle_of_the_sexes, labels=("Prize Fight", "Ballet"))
+    # experiment_varying_opponent_lr(battle_of_the_sexes, N_ROUNDS, target_action_index=0, target_action_name="Prize Fight")
 
 
 if __name__ == "__main__":

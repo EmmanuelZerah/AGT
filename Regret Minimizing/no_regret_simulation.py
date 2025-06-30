@@ -3,15 +3,16 @@ import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
 from tqdm import tqdm
 from MWAgent import MWAgent
+from RegretMatchingAgent import RegretMatchingAgent
 
-N_ROUNDS = 5000
+N_ROUNDS = 1000
 LR1 = 0.1
 LR2 = 0.1
 
 # Chicken game payoffs matrix
 chicken_game = np.array([
-    [[-5, -5], [3, -1]],
-    [[-1, 3], [0, 0]]
+    [[-1, -1], [1.0, -0.5]],
+    [[-0.5, 1.0], [0.0, 0.0]]
 ])
 
 # Battle of the sexes payoffs matrix
@@ -23,31 +24,33 @@ battle_of_the_sexes = np.array([
 
 def normalize(payoffs_matrix):
     """
-    Normalize each player's payoff matrix independently to the range [0, 1].
+    Normalize each player's payoff matrix independently to the range [-1, 1].
+
     Args:
-        payoffs_matrix: A 3D numpy array of shape (n_actions_p1, n_actions_p2, 2)
+        payoffs_matrix: A 3D numpy array of shape (n_actions_p1, n_actions_p2, 2),
                         where the last dimension corresponds to (p1_payoff, p2_payoff).
 
     Returns:
-        A normalized payoff matrix of the same shape.
+        A normalized payoff matrix in the range [-1, 1] for each player.
     """
     norm_payoffs_matrix = np.zeros_like(payoffs_matrix, dtype=np.float64)
 
     for player in [0, 1]:  # 0 for player 1, 1 for player 2
         player_payoffs = payoffs_matrix[:, :, player]
-        min_val = np.min(player_payoffs)
-        max_val = np.max(player_payoffs)
+        max_val = np.max(np.abs(player_payoffs))
 
         # Avoid division by zero
-        if max_val - min_val > 0:
-            norm_payoffs_matrix[:, :, player] = (player_payoffs - min_val) / (max_val - min_val)
+        if max_val > 0:
+            norm = player_payoffs / max_val
         else:
-            norm_payoffs_matrix[:, :, player] = 0.0  # all values are the same
+            norm = np.zeros_like(player_payoffs)
+
+        norm_payoffs_matrix[:, :, player] = norm
 
     return norm_payoffs_matrix
 
 
-def simulate_game(payoffs_matrix, n_rounds, name1="Player 1", name2="Player 2", lr1=0.1, lr2=0.1):
+def simulate_game(payoffs_matrix, n_rounds, agent1, agent2):
     """
     Simulate a game between two agents using the MW algorithm.
 
@@ -64,10 +67,6 @@ def simulate_game(payoffs_matrix, n_rounds, name1="Player 1", name2="Player 2", 
     """
     norm_payoffs_matrix = normalize(payoffs_matrix)
     n = payoffs_matrix.shape[0]
-
-    # Create agents
-    agent1 = MWAgent(n, lr1, name1)
-    agent2 = MWAgent(n, lr2, name2)
 
     for t in range(n_rounds):
         # Agents choose actions
@@ -188,19 +187,23 @@ def plot_empirical_joint_distribution(agent1, agent2, payoffs_matrix, labels=("A
 def experiment_varying_opponent_lr(
     payoffs_matrix,
     n_rounds,
-    fixed_lr1=0.1,
-    delta=0.09,
+    fixed_lr1=0.25,
+    delta=0.245,
     n_points=21,
     target_action_index=0,
     target_action_name="Action 0",
-    n_repeats=10
+    n_repeats=300
 ):
     # Create symmetric range of lr2 values around fixed_lr1
     lr2_values = np.linspace(fixed_lr1 - delta, fixed_lr1 + delta, n_points)
-    lr2_values = np.clip(lr2_values, 1e-4, 1.0)
+    lr2_values = np.clip(lr2_values, 1e-4, 0.5)
+
+
 
     def run_single_simulation(lr2):
-        agent1, agent2 = simulate_game(payoffs_matrix, n_rounds, lr1=fixed_lr1, lr2=lr2)
+        agent1 = MWAgent(n_actions=payoffs_matrix.shape[0], learning_rate=fixed_lr1, name="Player 1")
+        agent2 = MWAgent(n_actions=payoffs_matrix.shape[0], learning_rate=lr2, name="Player 2")
+        agent1, agent2 = simulate_game(payoffs_matrix, n_rounds, agent1, agent2)
         return agent1.distribution_history[-1][target_action_index]
 
     avg_probs = []
@@ -226,19 +229,38 @@ def experiment_varying_opponent_lr(
 
 
 def main():
-    # Simulate Chicken game
-    agent1_chicken, agent2_chicken = simulate_game(chicken_game, N_ROUNDS, LR1, LR2)
-    plot_regret(agent1_chicken, agent2_chicken, "Chicken Game")
-    plot_joint_strategy_matrix(agent1_chicken, agent2_chicken, chicken_game, labels=("Straight", "Swerve"))
-    plot_empirical_joint_distribution(agent1_chicken, agent2_chicken, chicken_game, labels=("Straight", "Swerve"))
-    experiment_varying_opponent_lr(chicken_game, N_ROUNDS, target_action_index=0, target_action_name="Straight")
+    # Simulate MW Agent vs. MW Agent
+    agent1 = MWAgent(n_actions=2, learning_rate=LR1, name="MW Agent 1")
+    agent2 = MWAgent(n_actions=2, learning_rate=LR2, name="MW Agent 2")
+    agent1, agent2 = simulate_game(chicken_game, N_ROUNDS, agent1, agent2)
+    plot_regret(agent1, agent2, "Hawk-Dove (Chicken Game) - MW vs MW")
+    plot_joint_strategy_matrix(agent1, agent2, chicken_game, labels=("Hawk", "Dove"))
+    plot_empirical_joint_distribution(agent1, agent2, chicken_game, labels=("Hawk", "Dove"))
+
+    # Simulate MW Agent vs. Regret Matching Agent
+    agent1 = RegretMatchingAgent(n_actions=2, name="Regret Matching Player")
+    agent2 = MWAgent(n_actions=2, learning_rate=LR2, name="MW Player")
+    agent1_regret, agent2_regret = simulate_game(chicken_game, N_ROUNDS, agent1, agent2)
+    plot_regret(agent1_regret, agent2_regret, "Hawk-Dove (Chicken Game) - RM vs MW")
+    plot_joint_strategy_matrix(agent1_regret, agent2_regret, chicken_game, labels=("Hawk", "Dove"))
+    plot_empirical_joint_distribution(agent1_regret, agent2_regret, chicken_game, labels=("Hawk", "Dove"))
+
+    # Simulate Regret Matching Agent vs. Regret Matching Agent
+    agent1 = RegretMatchingAgent(n_actions=2, name="Regret Matching 1")
+    agent2 = RegretMatchingAgent(n_actions=2, name="Regret Matching 2")
+    agent1_regret, agent2_regret = simulate_game(chicken_game, N_ROUNDS, agent1, agent2)
+    plot_regret(agent1_regret, agent2_regret, "Hawk-Dove (Chicken Game) - RM vs RM")
+    plot_joint_strategy_matrix(agent1_regret, agent2_regret, chicken_game, labels=("Hawk", "Dove"))
+    plot_empirical_joint_distribution(agent1_regret, agent2_regret, chicken_game, labels=("Hawk", "Dove"))
+
+    # # Experiment with varying opponent's learning rate
+    # experiment_varying_opponent_lr(chicken_game, N_ROUNDS, target_action_index=0, target_action_name="Hawk")
 
     # # Simulate Battle of sexes
-    # agent1_battle, agent2_battle = simulate_game(battle_of_the_sexes, N_ROUNDS, LR1, LR2)
-    # plot_regret(agent1_battle, agent2_battle, "Battle of the sexes")
-    # plot_joint_strategy_matrix(agent1_battle, agent2_battle, battle_of_the_sexes, labels=("Prize Fight", "Ballet"))
-    # plot_empirical_joint_distribution(agent1_battle, agent2_battle, battle_of_the_sexes, labels=("Prize Fight", "Ballet"))
-    # experiment_varying_opponent_lr(battle_of_the_sexes, N_ROUNDS, target_action_index=0, target_action_name="Prize Fight")
+    # agent1, agent2 = simulate_game(battle_of_the_sexes, N_ROUNDS, LR1, LR2)
+    # plot_regret(agent1, agent2, "Battle of the sexes")
+    # plot_joint_strategy_matrix(agent1, agent2, battle_of_the_sexes, labels=("Prize Fight", "Ballet"))
+    # plot_empirical_joint_distribution(agent1, agent2, battle_of_the_sexes, labels=("Prize Fight", "Ballet"))
 
 
 if __name__ == "__main__":

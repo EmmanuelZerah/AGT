@@ -101,3 +101,4 @@ class MWAgent(NoRegretAgent):
         self.best_action = None
         self.best_action_payoff = 0
         self.best_action_payoffs = None
+        self.regrets.clear()

@@ -11,6 +11,33 @@ from MWAgent import MWAgent
 # Auction / environment helpers
 # -----------------------------
 
+def fp_payoff_vector(value: float, opp_bid: float, bids: np.ndarray) -> np.ndarray:
+    """
+    Full-information utility for *every* possible bid in a classic
+    2-player First Price Auction (single slot).
+
+    Winner pays their *own* bid.
+    Tie is broken uniformly: expected utility = 0.5 * (value - b).
+    """
+    b = bids
+
+    win_mask = b > opp_bid
+    lose_mask = b < opp_bid
+    tie_mask = ~(win_mask | lose_mask)
+
+    u = np.zeros_like(b, dtype=float)
+
+    # Win: pay own bid
+    u[win_mask] = value - b[win_mask]
+
+    # Lose: utility = 0 (already set)
+
+    # Tie: 50% chance to win and pay own bid
+    u[tie_mask] = 0.5 * (value - b[tie_mask])
+
+    return u
+
+
 def gfp_payoff_vector(value: float, opp_bid: float, bids: np.ndarray) -> np.ndarray:
     """
     Full-information utility for *every* possible bid in a 2-slot GFP auction,
@@ -57,41 +84,52 @@ def sp_payoff_vector(value: float, opp_bid: float, bids: np.ndarray) -> np.ndarr
     return u
 
 
-def run_gfp_simulation(
+def build_bid_grid(max_bid: float, epsilon: float, decimals: int = 10) -> np.ndarray:
+    steps = int(np.floor((max_bid + 1e-12) / epsilon))
+    grid = epsilon * np.arange(steps + 1, dtype=float)  # 0, ε, 2ε, ..., steps*ε ≤ max_bid
+    return np.round(np.clip(grid, 0.0, max_bid), decimals)
+
+
+def run_auction_simulation(
     T: int = 1_000_000,
     v_high: float = 1.0,
     w_low: float = 0.5,
-    epsilon: float = 0.05,
-    eta_high: float = 0.1,
-    eta_low: float = 0.1,
-    seed=None
+    epsilon: float = 0.01,
+    eta_high: float = 0.05,
+    eta_low: float = 0.05,
+    utility_function=sp_payoff_vector,
+    seed=None,
+    no_overbidding=False
 ):
     """
-    Repeated GFP auction with two multiplicative-weights agents (full-information feedback).
-    Returns logs and the 2D joint histogram of bids.
+    Repeated auction (SPA/FPA/GFP) with two multiplicative-weights agents (full information).
+    Overbidding banned by using per-player bid grids capped at their value.
     """
     if seed is not None:
         np.random.seed(seed)
 
-    # Discrete ε-grid of bids (per-click), now from 0.00 to 1.00 in 0.05 steps
-    bids = np.round(np.arange(0.0, 1.0 + 1e-9, epsilon), 10)  # 0.00 ... 1.00
-    n_actions = len(bids)
+    if no_overbidding:
+        bids_hi = build_bid_grid(v_high, epsilon)  # ⊆ [0, v_high]
+        bids_lo = build_bid_grid(w_low, epsilon)  # ⊆ [0, w_low]
+    else:
+        max_value = max(v_high, w_low)
+        bids_hi = build_bid_grid(max_value, epsilon)
+        bids_lo = bids_hi.copy()
 
-    agent_hi = MWAgent(n_actions=n_actions, learning_rate=eta_high, name="High")
-    agent_lo = MWAgent(n_actions=n_actions, learning_rate=eta_low,  name="Low")
+    agent_hi = MWAgent(n_actions=len(bids_hi), learning_rate=eta_high, name="High")
+    agent_lo = MWAgent(n_actions=len(bids_lo), learning_rate=eta_low,  name="Low")
 
-    bid_samples_hi = []
-    bid_samples_lo = []
+    bid_samples_hi, bid_samples_lo = [], []
 
-
-    for t in tqdm(range(T), desc="GFP simulation"):
+    for _ in tqdm(range(T), desc="Auction simulation"):
         a_hi = agent_hi.choose_action()
         a_lo = agent_lo.choose_action()
-        b_hi = bids[a_hi]
-        b_lo = bids[a_lo]
+        b_hi = bids_hi[a_hi]
+        b_lo = bids_lo[a_lo]
 
-        u_all_hi = sp_payoff_vector(v_high, b_lo, bids)
-        u_all_lo = sp_payoff_vector(w_low,  b_hi, bids)
+        # utility vectors computed on each player's *own* action set
+        u_all_hi = utility_function(v_high, b_lo, bids_hi)  # shape = len(bids_hi)
+        u_all_lo = utility_function(w_low,  b_hi, bids_lo)  # shape = len(bids_lo)
 
         agent_hi.update(u_all_hi)
         agent_lo.update(u_all_lo)
@@ -100,7 +138,8 @@ def run_gfp_simulation(
         bid_samples_lo.append(b_lo)
 
     return {
-        "bids_axis": bids,
+        "bids_hi": bids_hi,
+        "bids_lo": bids_lo,
         "samples_hi": np.array(bid_samples_hi),
         "samples_lo": np.array(bid_samples_lo),
         "agent_hi": agent_hi,
@@ -108,36 +147,44 @@ def run_gfp_simulation(
     }
 
 
-def plot_bid_histograms(samples_hi, samples_lo, bids_axis, bins=None):
-    """
-    Plot two histograms: one for Player 1 (high value) and one for Player 2 (low value).
-    Both are normalized to probabilities.
-    """
-    if bins is None:
-        # use exact grid bins (aligned to bids_axis)
-        eps = float(np.round(bids_axis[1] - bids_axis[0], 12))
-        bins = np.r_[bids_axis - eps/2, bids_axis[-1] + eps/2]
-
-    fig, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
-
-    # Player 1 (high value)
-    counts_hi, _ = np.histogram(samples_hi, bins=bins)
+def plot_bid_histograms(samples_hi, samples_lo, bids_axis_hi, bids_axis_lo):
+    # --- Player 1 (high value) ---
+    eps_hi = float(np.round(bids_axis_hi[1] - bids_axis_hi[0], 12)) if len(bids_axis_hi) > 1 else 1.0
+    bins_hi = np.r_[bids_axis_hi - eps_hi/2, bids_axis_hi[-1] + eps_hi/2]
+    counts_hi, _ = np.histogram(samples_hi, bins=bins_hi)
     pmf_hi = counts_hi / counts_hi.sum()
-    centers = (bins[:-1] + bins[1:]) / 2
-    axes[0].bar(centers, pmf_hi, width=centers[1] - centers[0], align="center")
+    centers_hi = (bins_hi[:-1] + bins_hi[1:]) / 2
+
+    # --- Player 2 (low value) ---
+    eps_lo = float(np.round(bids_axis_lo[1] - bids_axis_lo[0], 12)) if len(bids_axis_lo) > 1 else 1.0
+    bins_lo = np.r_[bids_axis_lo - eps_lo/2, bids_axis_lo[-1] + eps_lo/2]
+    counts_lo, _ = np.histogram(samples_lo, bins=bins_lo)
+    pmf_lo = counts_lo / counts_lo.sum()
+    centers_lo = (bins_lo[:-1] + bins_lo[1:]) / 2
+
+    # --- Shared axis limits ---
+    max_bid = max(bids_axis_hi[-1], bids_axis_lo[-1])
+    max_prob = max(pmf_hi.max(), pmf_lo.max())
+
+    fig, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True, sharey=True)
+
+    axes[0].bar(centers_hi, pmf_hi, width=eps_hi, align="center")
     axes[0].set_ylabel("Probability")
     axes[0].set_title("Distribution of Player 1 (High Value) bids")
 
-    # Player 2 (low value)
-    counts_lo, _ = np.histogram(samples_lo, bins=bins)
-    pmf_lo = counts_lo / counts_lo.sum()
-    axes[1].bar(centers, pmf_lo, width=centers[1] - centers[0], align="center", color="orange")
+    axes[1].bar(centers_lo, pmf_lo, width=eps_lo, align="center", color="orange")
     axes[1].set_ylabel("Probability")
     axes[1].set_title("Distribution of Player 2 (Low Value) bids")
     axes[1].set_xlabel("Bid")
 
+    # Apply the same limits to both plots
+    for ax in axes:
+        ax.set_xlim(0, max_bid)
+        ax.set_ylim(0, max_prob * 1.05)  # small headroom for aesthetics
+
     plt.tight_layout()
     plt.show()
+
 
 
 def plot_joint_with_marginals(x, y, bids_axis, title="Joint distribution of bids (GFP, v=2, w=1)"):
@@ -188,41 +235,48 @@ def plot_joint_with_marginals(x, y, bids_axis, title="Joint distribution of bids
     plt.show()
 
 def main():
-    # Settings to mirror the paper’s Figure 6a:
-    # - v = 2, w = 1
-    # - large T to get a clear empirical density
-    out = run_gfp_simulation()
 
-    # Build the joint density figure
-    plot_joint_with_marginals(
-        out["samples_hi"],
-        out["samples_lo"],
-        bids_axis=out["bids_axis"],
-        title="(a) Joint distribution of bids of agents with v=2 and w=1"
+    out = run_auction_simulation(
+        T=1_000_000,
+        v_high=1.0,
+        w_low=0.5,
+        epsilon=0.01,
+        eta_high=0.01,
+        eta_low=0.01,
+        utility_function=fp_payoff_vector,
+        no_overbidding=True,
     )
 
-    plot_bid_histograms(out["samples_hi"], out["samples_lo"], out["bids_axis"])
+    # # Build the joint density figure
+    # plot_joint_with_marginals(
+    #     out["samples_hi"],
+    #     out["samples_lo"],
+    #     bids_axis=out["bids_axis"],
+    #     title="(a) Joint distribution of bids of agents with v=2 and w=1"
+    # )
+
+    plot_bid_histograms(out["samples_hi"], out["samples_lo"], out["bids_hi"], out["bids_lo"])
 
     # ---- Save empirical bids + joint probs to NPZ ----
-    bids_axis = out["bids_axis"]
-    x = out["samples_hi"]
-    y = out["samples_lo"]
+    # bids_axis = out["bids_axis"]
+    # x = out["samples_hi"]
+    # y = out["samples_lo"]
 
-    eps = float(np.round(bids_axis[1] - bids_axis[0], 12))
-    edges = np.r_[bids_axis - eps/2, bids_axis[-1] + eps/2]
+    # eps = float(np.round(bids_axis[1] - bids_axis[0], 12))
+    # edges = np.r_[bids_axis - eps/2, bids_axis[-1] + eps/2]
 
-    # joint counts on the ε-grid (one bin per bid), then normalize to probs
-    joint_counts, _, _ = np.histogram2d(x, y, bins=[edges, edges])
-    joint_probs = joint_counts / joint_counts.sum() if joint_counts.sum() > 0 else joint_counts
-
-    np.savez(
-        "empirical_bids_and_joint.npz",
-        bids=bids_axis,
-        samples_hi=x,
-        samples_lo=y,
-        joint_probs=joint_probs,
-    )
-    print("Saved -> empirical_bids_and_joint.npz")
+    # # joint counts on the ε-grid (one bin per bid), then normalize to probs
+    # joint_counts, _, _ = np.histogram2d(x, y, bins=[edges, edges])
+    # joint_probs = joint_counts / joint_counts.sum() if joint_counts.sum() > 0 else joint_counts
+    #
+    # np.savez(
+    #     "empirical_bids_and_joint.npz",
+    #     bids=bids_axis,
+    #     samples_hi=x,
+    #     samples_lo=y,
+    #     joint_probs=joint_probs,
+    # )
+    # print("Saved -> empirical_bids_and_joint.npz")
 
 
 

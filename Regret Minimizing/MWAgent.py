@@ -23,7 +23,7 @@ class MWAgent(NoRegretAgent):
 
         # Keep track of history for analysis
         self.action_history = []
-        self.distribution_history = []
+        # self.distribution_history = []
         self.payoff_history = []
         self.cumulative_payoff = 0
         self.best_action_payoff = 0
@@ -36,8 +36,8 @@ class MWAgent(NoRegretAgent):
         # Create probability distribution from weights
         probabilities = softmax(self.log_weights)
 
-        # Store the distribution for analysis
-        self.distribution_history.append(probabilities.copy())
+        # # Store the distribution for analysis
+        # self.distribution_history.append(probabilities.copy())
 
         # Sample action according to this distribution
         action = np.random.choice(self.n_actions, p=probabilities)
@@ -95,7 +95,7 @@ class MWAgent(NoRegretAgent):
         """Reset the agent's state for a new game."""
         self.log_weights = np.zeros(self.n_actions)
         self.action_history.clear()
-        self.distribution_history.clear()
+        # self.distribution_history.clear()
         self.payoff_history.clear()
         self.cumulative_payoff = 0
         self.best_action = None

@@ -38,9 +38,9 @@ class MWDeterministicAgent:
         Perform a deterministic MWU update against opponent's distribution.
         """
         u_exp = self.expected_payoff_vector(opp_dist)
-        self.log_weights += self.learning_rate * u_exp
+        self.log_weights += np.log(1 + self.learning_rate * u_exp)
         # normalize log_weights to improve numerical stability
-        self.log_weights -= np.max(self.log_weights)
+        self.log_weights -= np.mean(self.log_weights)
 
     def step(self, opp_dist: np.ndarray):
         """Alias for update() — provided for semantic clarity."""

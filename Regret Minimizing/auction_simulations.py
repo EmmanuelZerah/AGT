@@ -3,91 +3,8 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from tqdm import tqdm
 from matplotlib.ticker import MultipleLocator, FormatStrFormatter
-
 from MWAgent import MWAgent
-
-
-# -----------------------------
-# Auction / environment helpers
-# -----------------------------
-
-def fp_payoff_vector(value: float, opp_bid: float, bids: np.ndarray) -> np.ndarray:
-    """
-    Full-information utility for *every* possible bid in a classic
-    2-player First Price Auction (single slot).
-
-    Winner pays their *own* bid.
-    Tie is broken uniformly: expected utility = 0.5 * (value - b).
-    """
-    b = bids
-
-    win_mask = b > opp_bid
-    lose_mask = b < opp_bid
-    tie_mask = ~(win_mask | lose_mask)
-
-    u = np.zeros_like(b, dtype=float)
-
-    # Win: pay own bid
-    u[win_mask] = value - b[win_mask]
-
-    # Lose: utility = 0 (already set)
-
-    # Tie: 50% chance to win and pay own bid
-    u[tie_mask] = 0.5 * (value - b[tie_mask])
-
-    return u
-
-
-def gfp_payoff_vector(value: float, opp_bid: float, bids: np.ndarray) -> np.ndarray:
-    """
-    Full-information utility for *every* possible bid in a 2-slot GFP auction,
-    given opponent's realized bid 'opp_bid'.
-
-    Two slots with CTRs: top=1, bottom=0.5. First-price per click.
-    If my bid b > opp_bid  -> I win top: utility = (value - b)
-    If my bid b < opp_bid  -> I get bottom: utility = 0.5 * (value - b)
-    If tie b == opp_bid    -> expected utility = 0.75 * (value - b)  (coin for top)
-    """
-    b = bids
-    win_mask  = b > opp_bid
-    lose_mask = b < opp_bid
-    tie_mask  = ~win_mask & ~lose_mask  # equal
-
-    u = np.zeros_like(b, dtype=float)
-    u[win_mask]  = (value - b[win_mask])            # top slot CTR=1
-    u[lose_mask] = 0.5 * (value - b[lose_mask])     # bottom slot CTR=0.5
-    u[tie_mask]  = 0.75 * (value - b[tie_mask])     # expected: 1/2*top + 1/2*bottom = 3/4
-    return u
-
-
-def sp_payoff_vector(value: float, opp_bid: float, bids: np.ndarray) -> np.ndarray:
-    """
-    Full-information utility for *every* possible bid in a classic
-    2-player Second Price Auction (Vickrey auction).
-    """
-    b = bids
-
-    win_mask  = b > opp_bid
-    lose_mask = b < opp_bid
-    tie_mask  = ~(win_mask | lose_mask)
-
-    u = np.zeros_like(b, dtype=float)
-
-    # Win: pay opp_bid (not my own bid!)
-    u[win_mask] = value - opp_bid
-
-    # Lose: utility = 0 (already set)
-
-    # Tie: 50% chance to win at price = opp_bid
-    u[tie_mask] = 0.5 * (value - opp_bid)
-
-    return u
-
-
-def build_bid_grid(max_bid: float, epsilon: float, decimals: int = 10) -> np.ndarray:
-    steps = int(np.floor((max_bid + 1e-12) / epsilon))
-    grid = epsilon * np.arange(steps + 1, dtype=float)  # 0, ε, 2ε, ..., steps*ε ≤ max_bid
-    return np.round(np.clip(grid, 0.0, max_bid), decimals)
+from utils import build_bid_grid, spa_payoff_vector, fpa_payoff_vector, gfpa_payoff_vector
 
 
 def run_auction_simulation(
@@ -97,13 +14,12 @@ def run_auction_simulation(
     epsilon: float = 0.01,
     eta_high: float = 0.05,
     eta_low: float = 0.05,
-    utility_function=sp_payoff_vector,
+    utility_function=spa_payoff_vector,
     seed=None,
     no_overbidding=False
 ):
     """
     Repeated auction (SPA/FPA/GFP) with two multiplicative-weights agents (full information).
-    Overbidding banned by using per-player bid grids capped at their value.
     """
     if seed is not None:
         np.random.seed(seed)
@@ -235,12 +151,10 @@ def plot_joint_with_marginals(x, y, bids_axis, title="Joint distribution of bids
     plt.show()
 
 
-def plot_bid_dynamics(samples_hi, samples_lo, title=r"GFPA $v=1,\, w=1$"):
+def plot_bid_dynamics(samples_hi, samples_lo, title=r"GFPA $v=2,\, w=1$"):
     """
     Time-series of bids for both players:
       - thin raw traces (alpha)
-      - thick rolling mean
-      - shaded ±1 std band around the mean
     """
     x = np.arange(len(samples_hi))
     bids_max = max(np.nanmax(samples_hi), np.nanmax(samples_lo))
@@ -259,7 +173,7 @@ def plot_bid_dynamics(samples_hi, samples_lo, title=r"GFPA $v=1,\, w=1$"):
     ax.set_xlabel("Time (auction repetition)")
     ax.set_ylabel("Bid level")
     ax.legend(loc="upper right", frameon=False)
-    ax.set_title("FPA - " + title)
+    ax.set_title(title)
     plt.tight_layout()
     plt.show()
 
@@ -376,12 +290,12 @@ def main():
 
     out = run_auction_simulation(
         T=1_000_000,
-        v_high=1.0,
+        v_high=2.0,
         w_low=1.0,
         epsilon=0.01,
         eta_high=0.01,
         eta_low=0.01,
-        utility_function=gfp_payoff_vector,
+        utility_function=gfpa_payoff_vector,
         no_overbidding=True,
     )
 
@@ -395,16 +309,16 @@ def main():
 
     plot_bid_histograms(out["samples_hi"], out["samples_lo"], out["bids_hi"], out["bids_lo"])
     plot_bid_dynamics(out["samples_hi"], out["samples_lo"])
-    plot_joint_with_marginals_aligned(
-        out["samples_hi"], out["samples_lo"],
-        out["bids_hi"], out["bids_lo"],
-        title="GFPA (v=1, w=1, CTRs 1.0 & 0.5)"
-    )
-
-    # plot_joint_unit_after_filter_high_aligned(
-    #     out,
-    #     title="GFPA (v=2, w=1) — high bids restricted to [0,1]"
+    # plot_joint_with_marginals_aligned(
+    #     out["samples_hi"], out["samples_lo"],
+    #     out["bids_hi"], out["bids_lo"],
+    #     title="GFPA (v=1, w=1, CTRs 1.0 & 0.5)"
     # )
+
+    plot_joint_unit_after_filter_high_aligned(
+        out,
+        title="GFPA (v=2, w=1) — high bids restricted to [0,1]"
+    )
 
 
 

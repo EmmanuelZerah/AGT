@@ -134,6 +134,32 @@ def plot_joint_from_mixtures(bids_hi, p_hi, bids_lo, p_lo, title="Joint (p_hi �
     fig.suptitle(title, y=0.96); plt.show()
 
 
+def plot_argmax_bid_over_time(steps, p_hi_list, p_lo_list, bids_hi, bids_lo, title="Argmax bid over time"):
+    """
+    Plot the bid (not the probability) with the highest probability mass at each checkpoint.
+    """
+    if not steps:
+        print("No checkpoints to plot.")
+        return
+
+    # find which bid has the highest probability at each logged step
+    arg_hi = [bids_hi[np.argmax(p)] for p in p_hi_list]
+    arg_lo = [bids_lo[np.argmax(p)] for p in p_lo_list]
+
+    # plot the argmax bids over time
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.step(steps, arg_hi, where="post", lw=2, label="High agent", color="tab:blue")
+    ax.step(steps, arg_lo, where="post", lw=2, label="Low agent", color="orange")
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Bid with highest probability")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
 def main():
     epsilon = 0.01
     v_high, w_low = 1.0, 1.0
@@ -145,8 +171,8 @@ def main():
     hi, lo, log = run_deterministic_simulation(
         U_hi, U_lo,
         eta_high=0.01, eta_low=0.01,
-        T=900_000,
-        log_every=100_000,         # <-- log every 100k
+        T=1_000_000,
+        log_every=1_000,
     )
 
     # Final PMFs (as before)
@@ -156,15 +182,23 @@ def main():
 
     # New: PMFs at checkpoints
     if log is not None and log["steps"]:
-        plot_pmfs_checkpoints(
-            bids_hi, bids_lo,
+        # plot_pmfs_checkpoints(
+        #     bids_hi, bids_lo,
+        #     steps=log["steps"],
+        #     p_hi_list=log["p_hi"],
+        #     p_lo_list=log["p_lo"],
+        #     max_cols=3,
+        #     title="GFPA (v=2, w=1) — PMFs every 100k steps"
+        # )
+
+        plot_argmax_bid_over_time(
             steps=log["steps"],
             p_hi_list=log["p_hi"],
             p_lo_list=log["p_lo"],
-            max_cols=3,
-            title="GFPA (v=2, w=1) — PMFs every 100k steps"
+            bids_hi=bids_hi,
+            bids_lo=bids_lo,
+            title="Most probable bid over time"
         )
-
 
 
 if __name__ == "__main__":

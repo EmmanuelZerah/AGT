@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.special import softmax
-from NoRegretAgent import NoRegretAgent
+from algorithms.NoRegretAgent import NoRegretAgent
 
 
 class MWAgent(NoRegretAgent):

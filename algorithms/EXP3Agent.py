@@ -24,3 +24,4 @@ class EXP3Agent:
         arm_prob = float(self.prob[chosen_arm])
         xhat = reward / arm_prob  # reward should be between 0 and 1
         self.log_weights[chosen_arm] += self.learning_rate * xhat
+        self._update_probs()

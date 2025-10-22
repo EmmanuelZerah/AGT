@@ -6,6 +6,7 @@ from typing import Tuple, List
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
+from algorithms.ContextualPolicy import ContextualPolicy
 from algorithms.EXP3Agent import EXP3Agent
 from algorithms.MWAgent import MWAgent
 
@@ -190,7 +191,6 @@ def monopoly_on_discrete_grid(grid: np.ndarray, P: LogitParams) -> Tuple[float, 
             best_tuple = (float(p1), float(p2s[j]), float(pi1[j]), float(pi2[j]))
     return best_tuple
 
-
 # -------------------------
 # Plotting utilities
 # -------------------------
@@ -258,10 +258,8 @@ def plot_prices(prices_1, prices_2, pN_cont, pM_cont, title="Price paths",
     plt.tight_layout()
     plt.show()
 
-
-
 # -------------------------
-# MW simulation
+# simulations
 # -------------------------
 
 @dataclass
@@ -466,6 +464,76 @@ def run_simulation_bandit(P: LogitParams, C: BanditConfig):
     }
 
 
+def state_key_from_actions(a1_prev, a2_prev):
+    if a1_prev is None or a2_prev is None:
+        return ("START",)
+    return int(a1_prev), int(a2_prev)
+
+
+def run_simulation_contextual_mw(P: LogitParams, C: SimConfig):
+    # same grid & benchmarks as your current pipeline
+    coarse_min = min(P.c1, P.c2)
+    coarse_max = max(P.c1, P.c2) + 4.0
+    pN_cont = nash_prices_continuous(P, coarse_min, coarse_max)
+    pM_cont = monopoly_prices_continuous(P, coarse_min, coarse_max)
+    grid = build_action_grid(pN_cont, pM_cont, m=C.m, xi=C.xi)
+
+    p1N, p2N, pi1N, pi2N = nash_on_discrete_grid(grid, P)
+    p1M, p2M, pi1M, pi2M = monopoly_on_discrete_grid(grid, P)
+    piN_bar = 0.5 * (pi1N + pi2N); piM_bar = 0.5 * (pi1M + pi2M)
+
+    # contextual policies for each player (separate MW per state)
+    def mk1(): return MWAgent(n_actions=len(grid), learning_rate=C.eta1, seed=None, name="MW-1")
+    def mk2(): return MWAgent(n_actions=len(grid), learning_rate=C.eta2, seed=None, name="MW-2")
+    pol1 = ContextualPolicy(len(grid), mk1, seed=C.seed, name="CTX-MW-1")
+    pol2 = ContextualPolicy(len(grid), mk2, seed=C.seed+1 if C.seed is not None else None, name="CTX-MW-2")
+
+    prices_1, prices_2, profs_1, profs_2 = [], [], [], []
+    a1_prev = a2_prev = None
+
+    for t in tqdm(range(1, C.T + 1), desc="Contextual MW (k=1)"):
+        s = state_key_from_actions(a1_prev, a2_prev)
+        a1 = pol1.act(s)
+        a2 = pol2.act(s)
+        p1, p2 = float(grid[a1]), float(grid[a2])
+
+        # realized payoff
+        pi1, pi2 = profits(p1, p2, P)
+
+        # full-information payoff vectors vs realized opponent price
+        # these are the learning signals for the *policy used in state s*
+        my = grid
+        q1, _, _ = logit_shares(my, p2, P); r1_vec = (my - P.c1) * q1
+        _, q2, _ = logit_shares(p1, my, P); r2_vec = (my - P.c2) * q2
+
+        pol1.update_full_info(s, r1_vec)
+        pol2.update_full_info(s, r2_vec)
+
+        prices_1.append(p1); prices_2.append(p2)
+        profs_1.append(pi1); profs_2.append(pi2)
+
+        a1_prev, a2_prev = a1, a2
+
+        if (t % C.log_every) == 0:
+            avg_p = 0.5*(np.mean(prices_1[-C.log_every:]) + np.mean(prices_2[-C.log_every:]))
+            avg_pi = 0.5*(np.mean(profs_1[-C.log_every:]) + np.mean(profs_2[-C.log_every:]))
+            print(f"[t={t:,}] avg price≈{avg_p:.3f}, avg profit≈{avg_pi:.5f}")
+
+    burn = C.T // 5
+    P1 = np.array(prices_1[burn:], float); P2 = np.array(prices_2[burn:], float)
+    Pi1 = np.array(profs_1[burn:], float); Pi2 = np.array(profs_2[burn:], float)
+    avg_price = 0.5*(P1.mean()+P2.mean()); avg_profit = 0.5*(Pi1.mean()+Pi2.mean())
+    Delta = (avg_profit - piN_bar) / max(1e-12, (piM_bar - piN_bar))
+
+    return dict(
+        grid=grid, pN_cont=pN_cont, pM_cont=pM_cont,
+        pN_discrete=(p1N, p2N), pM_discrete=(p1M, p2M),
+        piN_bar=piN_bar, piM_bar=piM_bar,
+        avg_price=avg_price, avg_profit=avg_profit, Delta=float(Delta),
+        prices_1=prices_1, prices_2=prices_2
+    )
+
+
 def full_info_simulation():
     # Paper's baseline params: c_i=1, a_i - c_i = 1 => a_i = 2, a0 = 0, mu = 1/4
     P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.25)
@@ -539,6 +607,44 @@ def bandit_simulation():
         smooth=5000,          # try 2,000–10,000; None for raw
         max_points=20000      # plots up to ~20k points for speed
     )
+
+
+def contextual_simulation():
+    # Paper's baseline params: c_i=1, a_i - c_i = 1 => a_i = 2, a0 = 0, mu = 1/4
+    P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.25)
+
+    # Feel free to reduce T while iterating, then scale up
+    C = SimConfig(
+        T=1_000_000,  # try 200_000 for quick test; use 1e6+ for “stable” behavior
+        m=15,
+        xi=0.10,
+        eta1=0.05,
+        eta2=0.05,
+        seed=None,
+        log_every=100_000
+    )
+
+    res = run_simulation_contextual_mw(P, C)
+
+    print("\n==== STATIC BENCHMARKS ====")
+    print(f"p^N: ({res['pN_cont'][0]:.3f}, {res['pN_cont'][1]:.3f}),  "
+          f"π̄^N ≈ {res['piN_bar']:.5f}")
+    print(f"p^M: ({res['pM_cont'][0]:.3f}, {res['pM_cont'][1]:.3f}),  "
+          f"π̄^M ≈ {res['piM_bar']:.5f}")
+
+    print("\n==== MW DYNAMICS (post burn-in averages) ====")
+    print(f"Average price (firms’ mean): {res['avg_price']:.3f}")
+    print(f"Average profit per firm:     {res['avg_profit']:.5f}")
+    print(f"Δ (normalized profit gain):  {res['Delta']:.3f}")
+
+
+    plot_prices(
+        res["prices_1"], res["prices_2"],
+        res["pN_cont"], res["pM_cont"],
+        title="MW (full-information) — price paths",
+        max_points=20000
+    )
+
 
 
 if __name__ == "__main__":

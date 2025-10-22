@@ -1,0 +1,312 @@
+# simulate_mw_duopoly.py
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, List
+
+from tqdm import tqdm
+
+from MWAgent import MWAgent
+
+# -----------------------------
+# Economic environment (logit)
+# -----------------------------
+
+
+@dataclass
+class LogitParams:
+    a0: float = 0.0       # "outside good" quality (inverse demand shifter)
+    a1: float = 2.0       # quality of firm 1's product
+    a2: float = 2.0       # quality of firm 2's product
+    c1: float = 1.0       # marginal cost firm 1
+    c2: float = 1.0       # marginal cost firm 2
+    mu: float = 0.25      # horizontal differentiation (lower -> tougher competition)
+
+
+def logit_shares(p1: float, p2: float, P: LogitParams) -> Tuple[float, float, float]:
+    """Return (q1, q2, q0) given prices and parameters."""
+    u1 = (P.a1 - p1) / P.mu
+    u2 = (P.a2 - p2) / P.mu
+    u0 = P.a0 / P.mu
+    den = np.exp(u1) + np.exp(u2) + np.exp(u0)
+    q1 = np.exp(u1) / den
+    q2 = np.exp(u2) / den
+    q0 = np.exp(u0) / den
+    return q1, q2, q0
+
+
+def profits(p1: float, p2: float, P: LogitParams) -> Tuple[float, float]:
+    q1, q2, _ = logit_shares(p1, p2, P)
+    return (p1 - P.c1) * q1, (p2 - P.c2) * q2
+
+# --------------------------------------
+# Static benchmarks: p^N and p^M (cont)
+# --------------------------------------
+
+
+def best_response_against(p_other: float, for_player: int, grid: np.ndarray, P: LogitParams) -> float:
+    """Discrete best response price (argmax profit) vs opponent price p_other."""
+    if for_player == 1:
+        profs = np.array([profits(p, p_other, P)[0] for p in grid])
+    else:
+        profs = np.array([profits(p_other, p, P)[1] for p in grid])
+    return grid[int(np.argmax(profs))]
+
+
+def nash_prices_continuous(P, coarse_min, coarse_max, n_grid=1500,
+                           max_iter=10000, tol=1e-8, gamma=0.5):
+    """
+    Compute a 'continuous' Nash via iterated discrete best-responses on a fine grid
+    spanning a wide, reasonable range.
+    """
+    grid = np.linspace(coarse_min, coarse_max, n_grid)
+    p1 = P.c1 + 0.5
+    p2 = P.c2 + 0.5
+    for _ in range(max_iter):
+        p1_br = best_response_against(p2, for_player=1, grid=grid, P=P)
+        p2_br = best_response_against(p1_br, for_player=2, grid=grid, P=P)
+        p1_new = (1-gamma)*p1 + gamma*p1_br
+        p2_new = (1-gamma)*p2 + gamma*p2_br
+        if abs(p1_new - p1) + abs(p2_new - p2) < tol:
+            return float(p1_new), float(p2_new)
+        p1, p2 = p1_new, p2_new
+    return float(p1), float(p2)
+
+
+def _refine_window(lo, hi, center, shrink=0.35):
+    span = hi - lo
+    half = 0.5 * shrink * span
+    new_lo = max(lo, center - half)
+    new_hi = min(hi, center + half)
+    return new_lo, new_hi
+
+
+def monopoly_prices_continuous(P, coarse_min, coarse_max, n_grid=600, n_refine=3):
+    """Joint profit maximization over the same fine grid."""
+    lo, hi = coarse_min, coarse_max
+    p1_star, p2_star = None, None
+    for _ in range(n_refine):
+        grid = np.linspace(lo, hi, n_grid)
+        best_val = -1.0
+        best = (grid[0], grid[0])
+        for p1 in grid:
+            p2s = grid
+            q1, q2, _ = logit_shares(p1, p2s, P)
+            pi1 = (p1 - P.c1) * q1
+            pi2 = (p2s - P.c2) * q2
+            j = int(np.argmax(pi1 + pi2))
+            val = float(pi1[j] + pi2[j])
+            if val > best_val:
+                best_val = val
+                best = (float(p1), float(p2s[j]))
+        p1_star, p2_star = best
+        # refine window around best of both coordinates
+        lo, hi = _refine_window(coarse_min, coarse_max, 0.5 * (p1_star + p2_star))
+        # optional: also check if best hits boundary; if so, expand:
+        if p1_star >= hi - 1e-9 or p2_star >= hi - 1e-9:
+            hi += 2.0
+        if p1_star <= lo + 1e-9 or p2_star <= lo + 1e-9:
+            lo = max(coarse_min - 2.0, 0.0)
+    return p1_star, p2_star
+
+
+# -------------------------------------
+# Action grid built around p^N and p^M
+# -------------------------------------
+
+def build_action_grid(pN: Tuple[float, float], pM: Tuple[float, float], m: int = 15, xi: float = 0.1) -> np.ndarray:
+    """
+    Follow the paper: m equally spaced points in [p^N - xi*(p^M - p^N), p^M + xi*(p^M - p^N)].
+    With symmetry we center around the average of each pair.
+    """
+    # If asymmetric, use midpoint of each pair to get a scalar center, then a scalar span
+    center_N = 0.5 * (pN[0] + pN[1])
+    center_M = 0.5 * (pM[0] + pM[1])
+    span = center_M - center_N
+    lo = center_N - xi * span
+    hi = center_M + xi * span
+    return np.linspace(lo, hi, m)
+
+# ------------------------------------------------
+# Discrete-stage benchmarks (to compute Δ properly)
+# ------------------------------------------------
+
+def nash_on_discrete_grid(grid: np.ndarray, P: LogitParams, max_iter: int = 200, tol: float = 1e-8) -> Tuple[float, float, float, float]:
+    """Return (p1N, p2N, pi1N, pi2N) Nash best-response fixed point on the discrete action set."""
+    # Start at grid midpoints
+    p1 = grid[len(grid)//2]
+    p2 = grid[len(grid)//2]
+    for _ in range(max_iter):
+        p1_new = best_response_against(p2, 1, grid, P)
+        p2_new = best_response_against(p1_new, 2, grid, P)
+        if abs(p1_new - p1) + abs(p2_new - p2) < tol:
+            pi1N, pi2N = profits(p1_new, p2_new, P)
+            return float(p1_new), float(p2_new), float(pi1N), float(pi2N)
+        p1, p2 = p1_new, p2_new
+    pi1N, pi2N = profits(p1, p2, P)
+    return float(p1), float(p2), float(pi1N), float(pi2N)
+
+
+def monopoly_on_discrete_grid(grid: np.ndarray, P: LogitParams) -> Tuple[float, float, float, float]:
+    """Return (p1M, p2M, pi1M, pi2M) joint-profit maximizer on the discrete action set."""
+    best_val = -1.0
+    best_tuple = (grid[0], grid[0], 0.0, 0.0)
+    for p1 in grid:
+        # vectorized search over p2
+        p2s = grid
+        q1, q2, _ = logit_shares(p1, p2s, P)
+        pi1 = (p1 - P.c1) * q1
+        pi2 = (p2s - P.c2) * q2
+        tot = pi1 + pi2
+        j = int(np.argmax(tot))
+        if tot[j] > best_val:
+            best_val = float(tot[j])
+            best_tuple = (float(p1), float(p2s[j]), float(pi1[j]), float(pi2[j]))
+    return best_tuple
+
+# -------------------------
+# MW simulation
+# -------------------------
+
+@dataclass
+class SimConfig:
+    T: int = 1_000_000           # repetitions (MW has built-in exploration via its randomization)
+    m: int = 15                  # number of discrete actions (price points)
+    xi: float = 0.10             # range extension around [p^N, p^M]
+    eta1: float = 0.10           # MW learning rate for player 1
+    eta2: float = 0.10           # MW learning rate for player 2
+    seed: int = 42               # RNG seed for reproducibility
+    log_every: int = 100_000     # progress prints
+
+def payoff_vector_for_player(player: int, opp_price: float, grid: np.ndarray, P: LogitParams) -> np.ndarray:
+    """Full-information bandit feedback: payoff for each feasible action against the realized opponent price."""
+    if player == 1:
+        # vectorize over my price grid
+        my = grid
+        q1, _, _ = logit_shares(my, opp_price, P)
+        return (my - P.c1) * q1
+    else:
+        my = grid
+        _, q2, _ = logit_shares(opp_price, my, P)
+        return (my - P.c2) * q2
+
+
+def run_simulation(P: LogitParams, C: SimConfig):
+    if C.seed is not None:
+        np.random.seed(C.seed)
+
+    # 1) Find wide-range continuous p^N and p^M to build action grid the same way as the paper
+    coarse_min = min(P.c1, P.c2)       # cannot profit below cost; we’ll start there
+    coarse_max = max(P.c1, P.c2) + 4.0 # generous upper bound (works for baseline)
+    pN_cont = nash_prices_continuous(P, coarse_min, coarse_max)
+    pM_cont = monopoly_prices_continuous(P, coarse_min, coarse_max)
+
+    # 2) Action grid around those
+    grid = build_action_grid(pN_cont, pM_cont, m=C.m, xi=C.xi)
+
+    # 3) Static benchmarks on the discrete set (used for Δ)
+    p1N, p2N, pi1N, pi2N = nash_on_discrete_grid(grid, P)
+    p1M, p2M, pi1M, pi2M = monopoly_on_discrete_grid(grid, P)
+    piN_bar = 0.5 * (pi1N + pi2N)
+    piM_bar = 0.5 * (pi1M + pi2M)
+
+    # 4) Two MW agents over the discrete price grid
+    #    Your MWAgent samples actions according to softmax(log_weights) and updates via log(1 + eta * payoffs)
+    #    (see file). :contentReference[oaicite:3]{index=3}
+    agent1 = MWAgent(n_actions=len(grid), learning_rate=C.eta1, name="MW-1")
+    agent2 = MWAgent(n_actions=len(grid), learning_rate=C.eta2, name="MW-2")
+
+    # 5) Run repeated play
+    prices_1: List[float] = []
+    prices_2: List[float] = []
+    profs_1: List[float]  = []
+    profs_2: List[float]  = []
+
+    for t in tqdm(range(1, C.T + 1), desc="Simulating MW duopoly"):
+        a1 = agent1.choose_action()
+        a2 = agent2.choose_action()
+        p1, p2 = float(grid[a1]), float(grid[a2])
+
+        pi1, pi2 = profits(p1, p2, P)
+
+        # Full-information feedback vectors (all hypothetical payoffs vs realized opp price)
+        pay1 = payoff_vector_for_player(1, opp_price=p2, grid=grid, P=P)
+        pay2 = payoff_vector_for_player(2, opp_price=p1, grid=grid, P=P)
+
+        agent1.update(pay1)
+        agent2.update(pay2)
+
+        # record
+        prices_1.append(p1)
+        prices_2.append(p2)
+        profs_1.append(pi1)
+        profs_2.append(pi2)
+
+        if (t % C.log_every) == 0:
+            avg_p = 0.5 * (np.mean(prices_1[-C.log_every:]) + np.mean(prices_2[-C.log_every:]))
+            avg_pi = 0.5 * (np.mean(profs_1[-C.log_every:]) + np.mean(profs_2[-C.log_every:]))
+            print(f"[t={t:,}] avg price (last block) ≈ {avg_p:.3f}, avg profit per firm ≈ {avg_pi:.4f}")
+
+    # 6) Post-stats (ignore burn-in to mimic “limit behavior”)
+    burn = C.T // 5
+    P1 = np.array(prices_1[burn:], dtype=float)
+    P2 = np.array(prices_2[burn:], dtype=float)
+    Pi1 = np.array(profs_1[burn:], dtype=float)
+    Pi2 = np.array(profs_2[burn:], dtype=float)
+
+    avg_price = 0.5 * (P1.mean() + P2.mean())
+    avg_profit = 0.5 * (Pi1.mean() + Pi2.mean())
+
+    # Normalized profit gain Δ = (π - π^N) / (π^M - π^N)
+    Delta = (avg_profit - piN_bar) / max(1e-12, (piM_bar - piN_bar))
+
+    out = {
+        "grid": grid,
+        "pN_cont": pN_cont,
+        "pM_cont": pM_cont,
+        "pN_discrete": (p1N, p2N),
+        "pM_discrete": (p1M, p2M),
+        "piN_bar": piN_bar,
+        "piM_bar": piM_bar,
+        "avg_price": avg_price,
+        "avg_profit": avg_profit,
+        "Delta": float(Delta),
+        "agent1_regret_Tavg": agent1.regrets[-1] if agent1.regrets else 0.0,
+        "agent2_regret_Tavg": agent2.regrets[-1] if agent2.regrets else 0.0,
+    }
+    return out
+
+# -------------------------
+# Example run (baseline)
+# -------------------------
+
+if __name__ == "__main__":
+    # Paper's baseline params: c_i=1, a_i - c_i = 1 => a_i = 2, a0 = 0, mu = 1/4
+    P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.25)
+
+    # Feel free to reduce T while iterating, then scale up
+    C = SimConfig(
+        T=1_000_000,   # try 200_000 for quick test; use 1e6+ for “stable” behavior
+        m=15,
+        xi=0.10,
+        eta1=0.1,
+        eta2=0.1,
+        seed=None,
+        log_every=100_000
+    )
+
+    res = run_simulation(P, C)
+
+    print("\n==== STATIC BENCHMARKS (discrete action set) ====")
+    print(f"p^N (discrete): ({res['pN_discrete'][0]:.3f}, {res['pN_discrete'][1]:.3f}),  "
+          f"π̄^N ≈ {res['piN_bar']:.5f}")
+    print(f"p^M (discrete): ({res['pM_discrete'][0]:.3f}, {res['pM_discrete'][1]:.3f}),  "
+          f"π̄^M ≈ {res['piM_bar']:.5f}")
+
+    print("\n==== MW DYNAMICS (post burn-in averages) ====")
+    print(f"Average price (firms’ mean): {res['avg_price']:.3f}")
+    print(f"Average profit per firm:     {res['avg_profit']:.5f}")
+    print(f"Δ (normalized profit gain):  {res['Delta']:.3f}")
+
+    print("\n==== No-regret diagnostics ====")
+    print(f"Time-avg regret (MW-1): {res['agent1_regret_Tavg']:.6f}")
+    print(f"Time-avg regret (MW-2): {res['agent2_regret_Tavg']:.6f}")

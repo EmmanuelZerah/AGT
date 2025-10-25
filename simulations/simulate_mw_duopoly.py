@@ -2,10 +2,8 @@
 import numpy as np
 from dataclasses import dataclass
 from typing import Tuple, List
-
 from matplotlib import pyplot as plt
 from tqdm import tqdm
-
 from algorithms.ContextualPolicy import ContextualPolicy
 from algorithms.EXP3Agent import EXP3Agent
 from algorithms.MWAgent import MWAgent
@@ -240,8 +238,12 @@ def plot_prices(prices_1, prices_2, pN_cont, pM_cont, title="Price paths",
 
     plt.figure(figsize=(11, 5.5))
     # light raw traces
-    plt.plot(t, p1, alpha=0.35, linewidth=0.8, label="Firm 1 (raw)")
-    plt.plot(t, p2, alpha=0.35, linewidth=0.8, label="Firm 2 (raw)")
+    if smooth:
+        alpha = 0.35
+    else:
+        alpha = 1
+    plt.plot(t, p1, alpha=alpha, linewidth=0.8, label="Firm 1 (raw)")
+    plt.plot(t, p2, alpha=alpha, linewidth=0.8, label="Firm 2 (raw)")
     # thicker smoothed traces
     if smooth:
         plt.plot(t, p1s, linewidth=2.0, label=f"Firm 1 (rolling mean, w={smooth})")
@@ -262,6 +264,7 @@ def plot_prices(prices_1, prices_2, pN_cont, pM_cont, title="Price paths",
 # simulations
 # -------------------------
 
+
 @dataclass
 class SimConfig:
     T: int = 1_000_000           # repetitions (MW has built-in exploration via its randomization)
@@ -271,6 +274,7 @@ class SimConfig:
     eta2: float = 0.10           # MW learning rate for player 2
     seed: int = 42               # RNG seed for reproducibility
     log_every: int = 100_000     # progress prints
+
 
 @dataclass
 class BanditConfig:
@@ -283,6 +287,23 @@ class BanditConfig:
     gamma2: float = 0.07
     seed: int = 123
     log_every: int = 100_000
+
+
+@dataclass
+class ContextBanditConfig:
+    T: int = 2_000_000
+    m: int = 15
+    xi: float = 0.10
+    eta1: float = 0.07
+    eta2: float = 0.07
+    gamma1: float = 0.07
+    gamma2: float = 0.07
+    seed: int = 123
+    log_every: int = 100_000
+    # Optional annealing for exploration (keep small floor)
+    anneal_gamma: bool = False
+    gamma_floor: float = 0.01
+    gamma_power: float = 0.2   # γ_t = max(floor, γ0 * t^{-power})
 
 
 def payoff_vector_for_player(player: int, opp_price: float, grid: np.ndarray, P: LogitParams) -> np.ndarray:
@@ -483,15 +504,15 @@ def run_simulation_contextual_mw(P: LogitParams, C: SimConfig):
     piN_bar = 0.5 * (pi1N + pi2N); piM_bar = 0.5 * (pi1M + pi2M)
 
     # contextual policies for each player (separate MW per state)
-    def mk1(): return MWAgent(n_actions=len(grid), learning_rate=C.eta1, seed=None, name="MW-1")
-    def mk2(): return MWAgent(n_actions=len(grid), learning_rate=C.eta2, seed=None, name="MW-2")
+    def mk1(): return MWAgent(n_actions=len(grid), learning_rate=C.eta1, name="MW-1")
+    def mk2(): return MWAgent(n_actions=len(grid), learning_rate=C.eta2, name="MW-2")
     pol1 = ContextualPolicy(len(grid), mk1, seed=C.seed, name="CTX-MW-1")
     pol2 = ContextualPolicy(len(grid), mk2, seed=C.seed+1 if C.seed is not None else None, name="CTX-MW-2")
 
     prices_1, prices_2, profs_1, profs_2 = [], [], [], []
     a1_prev = a2_prev = None
 
-    for t in tqdm(range(1, C.T + 1), desc="Contextual MW (k=1)"):
+    for t in tqdm(range(1, C.T + 1), desc="Contextual MW Duopoly (k=1)"):
         s = state_key_from_actions(a1_prev, a2_prev)
         a1 = pol1.act(s)
         a2 = pol2.act(s)
@@ -530,6 +551,95 @@ def run_simulation_contextual_mw(P: LogitParams, C: SimConfig):
         pN_discrete=(p1N, p2N), pM_discrete=(p1M, p2M),
         piN_bar=piN_bar, piM_bar=piM_bar,
         avg_price=avg_price, avg_profit=avg_profit, Delta=float(Delta),
+        prices_1=prices_1, prices_2=prices_2
+    )
+
+
+def run_simulation_contextual_exp3(P: LogitParams, C: ContextBanditConfig):
+    # 1) grid & continuous benchmarks
+    coarse_min = min(P.c1, P.c2)
+    coarse_max = max(P.c1, P.c2) + 4.0
+    pN_cont = nash_prices_continuous(P, coarse_min, coarse_max)
+    pM_cont = monopoly_prices_continuous(P, coarse_min, coarse_max)
+    grid = build_action_grid(pN_cont, pM_cont, m=C.m, xi=C.xi)
+
+    # 2) discrete benchmarks for Δ
+    p1N, p2N, pi1N, pi2N = nash_on_discrete_grid(grid, P)
+    p1M, p2M, pi1M, pi2M = monopoly_on_discrete_grid(grid, P)
+    piN_bar = 0.5 * (pi1N + pi2N)
+    piM_bar = 0.5 * (pi1M + pi2M)
+
+    # 3) normalize rewards to [0,1]
+    U1, U2 = precompute_profit_caps(grid, P)
+
+    # 4) contextual policies: one EXP3 per state
+    def mk1():
+        return EXP3Agent(n_actions=len(grid), learning_rate=C.eta1, gamma=C.gamma1, seed=None, name="EXP3-1")
+    def mk2():
+        return EXP3Agent(n_actions=len(grid), learning_rate=C.eta2, gamma=C.gamma2, seed=None, name="EXP3-2")
+
+    pol1 = ContextualPolicy(len(grid), mk1, seed=C.seed, name="CTX-EXP3-1")
+    pol2 = ContextualPolicy(len(grid), mk2, seed=(C.seed + 1) if C.seed is not None else None, name="CTX-EXP3-2")
+
+    prices_1, prices_2, profs_1, profs_2 = [], [], [], []
+    a1_prev = a2_prev = None
+
+    # optional annealing helper
+    def _anneal(g0, t):
+        if not C.anneal_gamma:
+            return g0
+        return max(C.gamma_floor, g0 * (t ** (-C.gamma_power)))
+
+    for t in tqdm(range(1, C.T + 1), desc="Contextual EXP3 Duopoly (k=1)"):
+        s = state_key_from_actions(a1_prev, a2_prev)
+
+        # If you want annealing: reach into the per-state agent and update gamma before acting
+        if C.anneal_gamma:
+            # gentle: only if policy already exists (avoid constructing it just to set gamma)
+            if s in pol1.policies:
+                pol1.policies[s].gamma = _anneal(pol1.policies[s].gamma, t)
+            if s in pol2.policies:
+                pol2.policies[s].gamma = _anneal(pol2.policies[s].gamma, t)
+
+        a1 = pol1.act(s)
+        a2 = pol2.act(s)
+        p1, p2 = float(grid[a1]), float(grid[a2])
+
+        pi1, pi2 = profits(p1, p2, P)
+
+        # bandit feedback: normalize to [0,1]
+        r1 = float(np.clip(pi1 / U1, 0.0, 1.0))
+        r2 = float(np.clip(pi2 / U2, 0.0, 1.0))
+
+        # importance-weighted updates happen inside EXP3Agent
+        pol1.update_bandit(s, a1, r1)
+        pol2.update_bandit(s, a2, r2)
+
+        prices_1.append(p1); prices_2.append(p2)
+        profs_1.append(pi1);  profs_2.append(pi2)
+
+        a1_prev, a2_prev = a1, a2
+
+        if (t % C.log_every) == 0:
+            avg_p = 0.5 * (np.mean(prices_1[-C.log_every:]) + np.mean(prices_2[-C.log_every:]))
+            avg_pi = 0.5 * (np.mean(profs_1[-C.log_every:]) + np.mean(profs_2[-C.log_every:]))
+            print(f"[t={t:,}] avg price≈{avg_p:.3f}, avg profit≈{avg_pi:.5f}")
+
+    # 5) post-stats (ignore burn-in)
+    burn = C.T // 5
+    P1 = np.array(prices_1[burn:], float); P2 = np.array(prices_2[burn:], float)
+    Pi1 = np.array(profs_1[burn:],  float); Pi2 = np.array(profs_2[burn:],  float)
+
+    avg_price  = 0.5 * (P1.mean() + P2.mean())
+    avg_profit = 0.5 * (Pi1.mean() + Pi2.mean())
+    Delta = (avg_profit - piN_bar) / max(1e-12, (piM_bar - piN_bar))
+
+    return dict(
+        grid=grid, pN_cont=pN_cont, pM_cont=pM_cont,
+        pN_discrete=(p1N, p2N), pM_discrete=(p1M, p2M),
+        piN_bar=piN_bar, piM_bar=piM_bar,
+        avg_price=avg_price, avg_profit=avg_profit, Delta=float(Delta),
+        U1=U1, U2=U2,
         prices_1=prices_1, prices_2=prices_2
     )
 
@@ -609,13 +719,13 @@ def bandit_simulation():
     )
 
 
-def contextual_simulation():
+def mw_contextual_simulation():
     # Paper's baseline params: c_i=1, a_i - c_i = 1 => a_i = 2, a0 = 0, mu = 1/4
     P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.25)
 
     # Feel free to reduce T while iterating, then scale up
     C = SimConfig(
-        T=1_000_000,  # try 200_000 for quick test; use 1e6+ for “stable” behavior
+        T=2_000_000,  # try 200_000 for quick test; use 1e6+ for “stable” behavior
         m=15,
         xi=0.10,
         eta1=0.05,
@@ -641,8 +751,45 @@ def contextual_simulation():
     plot_prices(
         res["prices_1"], res["prices_2"],
         res["pN_cont"], res["pM_cont"],
-        title="MW (full-information) — price paths",
-        max_points=20000
+        title="Contextual MW (full-information) — price paths",
+        max_points=20000      # plots up to ~20k points for speed
+    )
+
+
+def contextual_bandit_simulation():
+    P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.25)
+
+    # ---- EXP3 (bandit) run ----
+    C_b = ContextBanditConfig(
+        T=2_000_000,  # bandit needs longer
+        m=15,
+        xi=0.10,
+        eta1=0.05, eta2=0.05,
+        gamma1=0.05, gamma2=0.05,
+        seed=None,
+        log_every=100_000,
+        anneal_gamma = True
+    )
+
+    res_b = run_simulation_contextual_exp3(P, C_b)
+
+    print("\n==== STATIC BENCHMARKS ====")
+    print(f"p^N: ({res_b['pN_cont'][0]:.3f}, {res_b['pN_cont'][1]:.3f}),  "
+          f"π̄^N ≈ {res_b['piN_bar']:.5f}")
+    print(f"p^M: ({res_b['pM_cont'][0]:.3f}, {res_b['pM_cont'][1]:.3f}),  "
+          f"π̄^M ≈ {res_b['piM_bar']:.5f}")
+
+    print("\n==== Contextual EXP3 DYNAMICS (post burn-in averages) ====")
+    print(f"Average price (firms’ mean): {res_b['avg_price']:.3f}")
+    print(f"Average profit per firm:     {res_b['avg_profit']:.5f}")
+    print(f"Δ (normalized profit gain):  {res_b['Delta']:.3f}")
+
+    plot_prices(
+        res_b["prices_1"], res_b["prices_2"],
+        res_b["pN_cont"], res_b["pM_cont"],
+        title="Contextual EXP3 (bandit) — price paths",
+        smooth=5000,          # try 2,000–10,000; None for raw
+        max_points=20000      # plots up to ~20k points for speed
     )
 
 
@@ -650,5 +797,10 @@ def contextual_simulation():
 if __name__ == "__main__":
     # print("Running full-information MW simulation...")
     # full_info_simulation()
-    print("Running bandit EXP3 simulation...")
-    bandit_simulation()
+    # print("Running bandit EXP3 simulation...")
+    # bandit_simulation()
+    # print("Running contextual MW simulation...")
+    # mw_contextual_simulation()
+    print("Running contextual bandit EXP3 simulation...")
+    contextual_bandit_simulation()
+

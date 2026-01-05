@@ -646,13 +646,13 @@ def run_simulation_contextual_exp3(P: LogitParams, C: ContextBanditConfig):
 
 def full_info_simulation():
     # Paper's baseline params: c_i=1, a_i - c_i = 1 => a_i = 2, a0 = 0, mu = 1/4
-    P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.25)
+    P = LogitParams(a0=0.0, a1=2.0, a2=2.0, c1=1.0, c2=1.0, mu=0.1)
 
     # Feel free to reduce T while iterating, then scale up
     C = SimConfig(
-        T=1_000_000,  # try 200_000 for quick test; use 1e6+ for “stable” behavior
-        m=15,
-        xi=0.10,
+        T=200000,  # try 200_000 for quick test; use 1e6+ for “stable” behavior
+        m=3,
+        xi=0.1,
         eta1=0.05,
         eta2=0.05,
         seed=None,
@@ -795,12 +795,12 @@ def contextual_bandit_simulation():
 
 
 if __name__ == "__main__":
-    # print("Running full-information MW simulation...")
-    # full_info_simulation()
+    print("Running full-information MW simulation...")
+    full_info_simulation()
     # print("Running bandit EXP3 simulation...")
     # bandit_simulation()
     # print("Running contextual MW simulation...")
     # mw_contextual_simulation()
-    print("Running contextual bandit EXP3 simulation...")
-    contextual_bandit_simulation()
+    # print("Running contextual bandit EXP3 simulation...")
+    # contextual_bandit_simulation()
 

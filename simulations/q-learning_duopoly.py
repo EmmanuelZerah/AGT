@@ -6,7 +6,7 @@ from tqdm import tqdm
 # --- 1. CONFIGURATION & PARAMETERS ---
 # Parameters taken from Section 5 "Anatomy of Collusion"
 ALPHA = 0.2  # Learning rate (speed of learning)
-BETA = 1e-5  # Experimentation decay (exploration parameter)
+BETA = 15e-6  # Experimentation decay (exploration parameter)
 DELTA = 0.95  # Discount factor
 MU = 0.25  # Horizontal differentiation (substitutability)
 A_val = 2.0  # Product quality (a_i - c_i = 1, so if c=1, a=2)
@@ -17,7 +17,7 @@ XI = 0.1  # Grid expansion parameter (how far outside Nash/Monopoly to go)
 
 # Simulation Duration
 # The paper typically sees convergence around 850,000 steps.
-NUM_EPISODES = 10_000_000
+NUM_EPISODES = 3_000_000
 
 
 # --- 2. ECONOMIC ENVIRONMENT ---
@@ -142,94 +142,95 @@ class Agent:
         self.q_table[self.last_state_idx, self.last_action_idx] = new_q
 
 
-# --- 6. INITIALIZATION ---
-# Calculate the initial Q-value (Equation 8)
-# This represents the expected profit if the opponent plays randomly.
-avg_profits = []
-for p_i in action_space:
-    p_i_profits = []
-    for p_j in action_space:
-        pi, _ = get_profit(p_i, p_j)
-        p_i_profits.append(pi)
-    avg_profits.append(np.mean(p_i_profits))
-initial_q = np.mean(avg_profits) / (1 - DELTA)
+for _ in range(3):
+    # --- 6. INITIALIZATION ---
+    # Calculate the initial Q-value (Equation 8)
+    # This represents the expected profit if the opponent plays randomly.
+    avg_profits = []
+    for p_i in action_space:
+        p_i_profits = []
+        for p_j in action_space:
+            pi, _ = get_profit(p_i, p_j)
+            p_i_profits.append(pi)
+        avg_profits.append(np.mean(p_i_profits))
+    initial_q = np.mean(avg_profits) / (1 - DELTA)
 
-print(f"Initial Q-Table Value: {initial_q:.4f}")
+    print(f"Initial Q-Table Value: {initial_q:.4f}")
 
-# --- 7. MAIN SIMULATION LOOP ---
+    # --- 7. MAIN SIMULATION LOOP ---
 
-# State Space: The state is defined by the previous prices of both agents.
-# We map (p1_idx, p2_idx) to a single integer state_idx.
-n_states = M * M
+    # State Space: The state is defined by the previous prices of both agents.
+    # We map (p1_idx, p2_idx) to a single integer state_idx.
+    n_states = M * M
 
-# Create Agents
-agent1 = Agent(M, n_states, initial_q)
-agent2 = Agent(M, n_states, initial_q)
+    # Create Agents
+    agent1 = Agent(M, n_states, initial_q)
+    agent2 = Agent(M, n_states, initial_q)
 
-# Random start
-p1_idx = np.random.randint(M)
-p2_idx = np.random.randint(M)
-state_idx = p1_idx * M + p2_idx
+    # Random start
+    p1_idx = np.random.randint(M)
+    p2_idx = np.random.randint(M)
+    state_idx = p1_idx * M + p2_idx
 
-history_delta = []
+    history_delta = []
 
-# Variables to store previous reward for updating
-pi1_prev = 0
-pi2_prev = 0
+    # Variables to store previous reward for updating
+    pi1_prev = 0
+    pi2_prev = 0
 
-print(f"\nRunning {NUM_EPISODES} episodes...")
+    print(f"\nRunning {NUM_EPISODES} episodes...")
 
-for t in tqdm(range(NUM_EPISODES), desc="Running Simulation"):
-    # Calculate current Exploration Rate (epsilon)
-    epsilon = np.exp(-BETA * t)
+    for t in tqdm(range(NUM_EPISODES), desc="Running Simulation"):
+        # Calculate current Exploration Rate (epsilon)
+        epsilon = np.exp(-BETA * t)
 
-    # 1. Agents choose actions based on CURRENT state
-    a1_idx = agent1.choose_action(state_idx, epsilon)
-    a2_idx = agent2.choose_action(state_idx, epsilon)
+        # 1. Agents choose actions based on CURRENT state
+        a1_idx = agent1.choose_action(state_idx, epsilon)
+        a2_idx = agent2.choose_action(state_idx, epsilon)
 
-    # 2. Market determines profits
-    p1 = action_space[a1_idx]
-    p2 = action_space[a2_idx]
-    pi1, pi2 = get_profit(p1, p2)
+        # 2. Market determines profits
+        p1 = action_space[a1_idx]
+        p2 = action_space[a2_idx]
+        pi1, pi2 = get_profit(p1, p2)
 
-    # 3. Determine NEW state
-    new_state_idx = a1_idx * M + a2_idx
+        # 3. Determine NEW state
+        new_state_idx = a1_idx * M + a2_idx
 
-    # 4. Learning Step (Update Q-values based on PREVIOUS actions and CURRENT state)
-    if t > 0:
-        agent1.update(pi1_prev, new_state_idx)
-        agent2.update(pi2_prev, new_state_idx)
+        # 4. Learning Step (Update Q-values based on PREVIOUS actions and CURRENT state)
+        if t > 0:
+            agent1.update(pi1_prev, new_state_idx)
+            agent2.update(pi2_prev, new_state_idx)
 
-    # 5. Store current info for next step
-    agent1.last_state_idx = state_idx
-    agent1.last_action_idx = a1_idx
-    agent2.last_state_idx = state_idx
-    agent2.last_action_idx = a2_idx
+        # 5. Store current info for next step
+        agent1.last_state_idx = state_idx
+        agent1.last_action_idx = a1_idx
+        agent2.last_state_idx = state_idx
+        agent2.last_action_idx = a2_idx
 
-    pi1_prev = pi1
-    pi2_prev = pi2
-    state_idx = new_state_idx
+        pi1_prev = pi1
+        pi2_prev = pi2
+        state_idx = new_state_idx
 
-    # 6. Record Statistics (Delta) every 1000 steps
-    if t % 1000 == 0:
-        avg_pi = (pi1 + pi2) / 2
-        # Delta = (Actual Profit - Nash Profit) / (Monopoly Profit - Nash Profit)
-        delta = (avg_pi - pi_nash) / (pi_monop - pi_nash)
-        history_delta.append(delta)
+        # 6. Record Statistics (Delta) every 1000 steps
+        if t % 1000 == 0:
+            avg_pi = (pi1 + pi2) / 2
+            # Delta = (Actual Profit - Nash Profit) / (Monopoly Profit - Nash Profit)
+            delta = (avg_pi - pi_nash) / (pi_monop - pi_nash)
+            history_delta.append(delta)
 
-# --- 8. VISUALIZATION ---
+    # --- 8. VISUALIZATION ---
 
-print("Simulation finished.")
-window = 100  # Moving average window
-smoothed_delta = np.convolve(history_delta, np.ones(window) / window, mode='valid')
+    print("Simulation finished.")
+    window = 100  # Moving average window
+    smoothed_delta = np.convolve(history_delta, np.ones(window) / window, mode='valid')
 
-plt.figure(figsize=(12, 6))
-plt.plot(smoothed_delta, linewidth=1.5)
-plt.title(f"Average Profit Gain ($\Delta$) over Time\nAlpha={ALPHA}, Beta={BETA}")
-plt.xlabel("Time (x1000 periods)")
-plt.ylabel("Degree of Collusion ($\Delta$)")
-plt.axhline(0, color='red', linestyle='--', label="Nash Equilibrium")
-plt.axhline(1, color='green', linestyle='--', label="Monopoly")
-plt.legend()
-plt.grid(alpha=0.3)
-plt.show()
+    plt.figure(figsize=(12, 6))
+    plt.plot(smoothed_delta, linewidth=1.5)
+    plt.title(f"Q-Learning: Average Profit Gain ($\Delta$) over Time\nAlpha={ALPHA}, Beta={BETA}")
+    plt.xlabel("Time (x1000 periods)")
+    plt.ylabel("Degree of Collusion ($\Delta$)")
+    plt.axhline(0, color='red', linestyle='--', label="Nash Equilibrium")
+    plt.axhline(1, color='green', linestyle='--', label="Monopoly")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.show()

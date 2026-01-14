@@ -651,7 +651,7 @@ def full_info_simulation():
     # Feel free to reduce T while iterating, then scale up
     C = SimConfig(
         T=200000,  # try 200_000 for quick test; use 1e6+ for “stable” behavior
-        m=3,
+        m=15,
         xi=0.1,
         eta1=0.05,
         eta2=0.05,

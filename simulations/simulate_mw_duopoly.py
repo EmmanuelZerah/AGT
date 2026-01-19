@@ -768,7 +768,7 @@ def contextual_bandit_simulation():
         gamma1=0.05, gamma2=0.05,
         seed=None,
         log_every=100_000,
-        anneal_gamma = True
+        anneal_gamma=False
     )
 
     res_b = run_simulation_contextual_exp3(P, C_b)
@@ -795,12 +795,12 @@ def contextual_bandit_simulation():
 
 
 if __name__ == "__main__":
-    print("Running full-information MW simulation...")
-    full_info_simulation()
-    # print("Running bandit EXP3 simulation...")
-    # bandit_simulation()
+    # print("Running full-information MW simulation...")
+    # full_info_simulation()
+    print("Running bandit EXP3 simulation...")
+    bandit_simulation()
     # print("Running contextual MW simulation...")
     # mw_contextual_simulation()
     # print("Running contextual bandit EXP3 simulation...")
-    # contextual_bandit_simulation()
+    contextual_bandit_simulation()
 

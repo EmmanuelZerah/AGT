@@ -1,18 +1,19 @@
 import numpy as np
 
 
-class Exp3IX:
-    def __init__(self, n_arms):
+class EXP3IX:
+    def __init__(self, n_arms, learning_rate_scale=1.0):
         self.n_arms = n_arms
         self.t = 0
         self.cumulative_losses = np.zeros(n_arms)  # Track losses, not rewards
+        self.lr_scale = learning_rate_scale
 
     def choose_action(self):
         self.t += 1
 
         # 1. Anytime Learning Rate (Neu 2015 parameterization)
         # eta_t = sqrt(2 * log(K) / (K * t))
-        eta = np.sqrt(2 * np.log(self.n_arms) / (self.n_arms * self.t))
+        eta = self.lr_scale * np.sqrt(2 * np.log(self.n_arms) / (self.n_arms * self.t))
 
         # 2. Implicit Exploration Parameter
         # Standard setting is gamma = eta / 2
